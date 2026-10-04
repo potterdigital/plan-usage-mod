@@ -1,0 +1,48 @@
+{
+  "name": "plan-usage",
+  "displayName": "Plan Usage",
+  "version": "0.1.0",
+  "description": "Shows your Claude plan's session and weekly limits above the prompt, gives Claude a plan_usage tool to check them at no token cost, and can pause a long-running session before the session limit and continue after it resets.",
+  "author": { "name": "Brian Potter", "url": "https://github.com/potterdigital" },
+  "homepage": "https://github.com/potterdigital/plan-usage-mod",
+  "repository": "https://github.com/potterdigital/plan-usage-mod",
+  "license": "MIT",
+  "keywords": ["mod", "usage", "rate-limits", "plan", "status", "overnight"],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "warn_at": {
+      "type": "number",
+      "title": "Warning level (percent)",
+      "description": "From this percent of a limit, the band turns orange and reads HIGH.",
+      "default": 80,
+      "min": 1,
+      "max": 100
+    },
+    "time_zone": {
+      "type": "string",
+      "title": "Time zone",
+      "description": "IANA time zone for reset times, such as America/Chicago. Leave empty to use this computer's.",
+      "default": ""
+    },
+    "auto_pause": {
+      "type": "boolean",
+      "title": "Pause near the session limit",
+      "description": "When the session limit reaches the threshold, let running tool calls finish, stop the turn, and continue 2 minutes after the limit resets.",
+      "default": false
+    },
+    "pause_threshold": {
+      "type": "number",
+      "title": "Pause threshold (percent)",
+      "description": "Session-limit percent that starts the pause when it is on.",
+      "default": 95,
+      "min": 1,
+      "max": 100
+    },
+    "resume_prompt": {
+      "type": "string",
+      "title": "Resume prompt",
+      "description": "What the session is sent when it continues after a pause.",
+      "default": "Plan usage reset; resume where you left off from the files on disk."
+    }
+  }
+}

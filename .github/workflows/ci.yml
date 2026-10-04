@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Install Claude Code and Prettier
+        run: npm install --global @anthropic-ai/claude-code@latest prettier@latest
+      - name: Validate the plugin and marketplace (warnings fail the run)
+        run: claude plugin validate --strict .
+      - name: Run the tests
+        run: claude plugin test .
+      - name: Check formatting
+        run: prettier --check .

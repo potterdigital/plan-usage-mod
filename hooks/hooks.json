@@ -1,0 +1,4 @@
+{
+  "description": "plan-usage hooks module",
+  "modules": ["./register.tsx"]
+}

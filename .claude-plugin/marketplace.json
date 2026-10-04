@@ -1,0 +1,14 @@
+{
+  "name": "potterdigital",
+  "owner": {
+    "name": "Brian Potter",
+    "url": "https://github.com/potterdigital"
+  },
+  "description": "Claude Code plugins by Potter Digital.",
+  "plugins": [
+    {
+      "name": "plan-usage",
+      "source": "./"
+    }
+  ]
+}
