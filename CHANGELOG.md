@@ -10,7 +10,7 @@ All notable changes to this project are listed here. The format follows [Keep a 
 - The `plan_usage` tool and the `/plan-usage` command, which report every limit window as JSON without a model call.
 - Sharing of the newest reading between open sessions on the same Claude profile, so idle sessions stay current.
 - An optional pause near the session limit that lets running tool calls finish, ends the turn, and continues two minutes after the reset. It runs only in interactive sessions, and a prompt you send while it is in place cancels it until the window resets.
-- A one-time first-run line to choose `show_at`: always, from 50%, from 80%, or a percent you type.
+- A first-run question, shown until answered, to choose `show_at`: always, from 50%, from 80%, or a percent you type.
 - Settings: `warn_at`, `show_at`, `time_zone`, `auto_pause`, `pause_threshold`, `resume_prompt`.
 
 [0.1.0]: https://github.com/potterdigital/plan-usage-mod/releases/tag/v0.1.0

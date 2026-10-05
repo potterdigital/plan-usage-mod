@@ -1,4 +1,4 @@
-// Budget: 35 tests, under 3 seconds together. Fakes only Claude Code's answers and the clock.
+// Budget: 42 tests, under 3 seconds together. Fakes only Claude Code's answers and the clock.
 import type { UsageUnit } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 import type { MockClock, TestBody } from 'claude-code/testing'
@@ -45,7 +45,7 @@ interface Fake {
 }
 
 // Every answer Claude Code would give; registered before the test's first $ call.
-function engine(on: On, replyWindows: Window[], isOnboarded = true): Fake {
+function engine(on: On, replyWindows: Window[], isOnboarded = true, configRefusal?: string): Fake {
   const clock = mock.clock(on, { now: NOW })
   const calls: Calls = { configured: [], aborted: [], submitted: [], logs: [] }
   // Tests other than the first-run ones start on a machine where show_at was already chosen.
@@ -67,6 +67,7 @@ function engine(on: On, replyWindows: Window[], isOnboarded = true): Fake {
   })
   on('ui.toast', () => ({ value: undefined }))
   on('config.set', ($, e) => {
+    if (configRefusal !== undefined) return { deny: configRefusal }
     calls.configured.push({ key: e.key, value: e.value })
     return { value: e.value }
   })
@@ -547,32 +548,95 @@ test('auto-pause stays off in a claude -p run, which could never continue', { op
 
 // ---- First run ----
 
-test('the first run offers a choice, and pressing 2 saves show_at 50 once', { options: CHICAGO }, async ($, on) => {
-  // GUARDS: the first-run line not saving the choice as the setting, or coming back after it was made.
+test('the first run offers a choice; Always saves 0 and the question does not come back', { options: CHICAGO }, async ($, on) => {
+  // GUARDS: Always saving something other than 0, the choice not reaching the setting, or the question repeating.
   const { calls, store } = engine(on, windows(42, 63), false)
   await $.session.start(START)
   const ui = await band($)
   expect(await ui.find({ type: 'Text', text: 'Plan usage: show your limits above the prompt' })).toBeDefined()
-  await ui.press({ key: 'show-50' })
-  expect(calls.configured).toEqual([{ key: 'plan-usage.show_at', value: 50 }])
+  expect(await ui.find({ type: 'Text', text: /^Session 42%/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'a note from another mod' })).toBeDefined()
+  await ui.press({ key: 'show-always' })
+  expect(calls.configured).toEqual([{ key: 'plan-usage.show_at', value: 0 }])
   expect(store.get('onboarded')).toBe(true)
   await ui.unmount()
   const after = await band($)
   expect(await after.find({ type: 'Text', text: /show your limits/ })).toBeUndefined()
-  expect(await after.find({ type: 'Text', text: /^Session/ })).toBeUndefined()
 })
 
-test('Other takes a typed percent and turns away one outside 0 to 100', { options: CHICAGO }, async ($, on) => {
-  // GUARDS: saving a nonsense show_at, or giving no hint when the entry is rejected.
+test('From 80% saves 80 and hides limits below it', { options: CHICAGO }, async ($, on) => {
+  // GUARDS: a preset saving the wrong percent, or the line not following the choice at once.
+  const { calls } = engine(on, windows(42, 63), false)
+  await $.session.start(START)
+  const ui = await band($)
+  await ui.press({ key: 'show-80' })
+  expect(calls.configured).toEqual([{ key: 'plan-usage.show_at', value: 80 }])
+  await ui.unmount()
+  expect(await (await band($)).find({ type: 'Text', text: /^Session|^Weekly/ })).toBeUndefined()
+})
+
+test('Other takes only a whole number from 0 to 100', { options: CHICAGO }, async ($, on) => {
+  // GUARDS: saving a nonsense show_at from a typo, a sign, a decimal, an empty entry or a number written as 1e1.
   const { calls } = engine(on, windows(42, 63), false)
   await $.session.start(START)
   const ui = await band($)
   await ui.press({ key: 'show-other' })
-  await ui.input({ key: 'show-at', text: '150' })
-  expect(await ui.find({ type: 'Text', text: 'Enter a whole number from 0 to 100.' })).toBeDefined()
+  for (const entry of ['150', '-5', '65.5', '', '1e1', '0x10']) {
+    await ui.input({ key: 'show-at', text: entry })
+    expect(await ui.find({ type: 'Text', text: 'Enter a whole number from 0 to 100.' })).toBeDefined()
+  }
   expect(calls.configured).toEqual([])
   await ui.input({ key: 'show-at', text: '65' })
   expect(calls.configured).toEqual([{ key: 'plan-usage.show_at', value: 65 }])
+})
+
+test('a refused save keeps the question up and says so', { options: CHICAGO }, async ($, on) => {
+  // GUARDS: marking the first run done when the setting was never saved (round-three finding 2).
+  const { calls, store } = engine(on, windows(42, 63), false, 'locked by policy')
+  await $.session.start(START)
+  const ui = await band($)
+  await ui.press({ key: 'show-50' })
+  expect(store.get('onboarded')).toBe(false)
+  expect(await ui.find({ type: 'Text', text: 'Could not save that. Choose again, or set show_at in /config.' })).toBeDefined()
+  expect(calls.logs).toContain('show_at was not saved: locked by policy')
+})
+
+test('a choice made while a turn runs is saved when the turn ends', { options: CHICAGO }, async ($, on) => {
+  // GUARDS: saving mid-turn, which reloads the mod while tools run (round-three minor).
+  const { calls } = engine(on, windows(42, 63), false)
+  await $.session.start(START)
+  await $.turn.start({ text: 'work', turnId: 't1' })
+  const ui = await band($)
+  await ui.press({ key: 'show-50' })
+  expect(calls.configured).toEqual([])
+  await $.turn.complete(complete('t1'))
+  expect(calls.configured).toEqual([{ key: 'plan-usage.show_at', value: 50 }])
+})
+
+test('while the question is up, a pause still shows', { options: PAUSING }, async ($, on) => {
+  // GUARDS: tool calls refused with no PAUSED line because the question took the band (round-three finding 1).
+  engine(on, windows(50, 20), false)
+  await $.session.start(START)
+  await $.turn.start({ text: 'work', turnId: 't1' })
+  await $.session.measure(measured(96, 20))
+  const ui = await band($)
+  expect(await ui.find({ type: 'Text', text: /show your limits/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '⏸ PAUSED at 96% · continues 4:12 AM CT' })).toBeDefined()
+})
+
+test('the question comes back after /clear until it is answered', { options: CHICAGO }, async ($, on) => {
+  // GUARDS: /clear resetting the session's state and losing the unanswered question.
+  const saved = new Map<string, unknown>()
+  on('state.get', ($, e) => ({ value: { value: saved.get(e.key), version: 1 } }))
+  on('state.set', ($, e) => {
+    saved.set(e.key, e.value)
+    return { value: { isSet: true, version: 2 } }
+  })
+  engine(on, windows(42, 63), false)
+  await $.session.start(START)
+  saved.clear()
+  await $.classic.SessionStart({ source: 'clear' })
+  expect(saved.get('onboarding')).toEqual({ step: 'choose' })
 })
 
 test('no first-run line once someone chose, or in a claude -p run', { options: CHICAGO }, async ($, on) => {
@@ -583,6 +647,39 @@ test('no first-run line once someone chose, or in a claude -p run', { options: C
   expect(await ui.find({ type: 'Text', text: /show your limits/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /^Session 42%/ })).toBeDefined()
 })
+
+test('a quiet line under show_at leaves no stray pieces', { options: { ...CHICAGO, show_at: 90 } }, async ($, on) => {
+  // GUARDS: "no reading yet", "as of" or the override tag showing while show_at keeps the line quiet.
+  const saved: Record<string, unknown> = { overrideUntil: Date.parse(SESSION_RESET) }
+  on('state.get', ($, e) => ({ value: { value: saved[e.key], version: 1 } }))
+  const { clock } = engine(on, [])
+  await $.session.start(START)
+  const empty = await band($)
+  expect(await empty.find({ type: 'Text', text: /no reading|pause off/ })).toBeUndefined()
+  await empty.unmount()
+  saved.reading = { limits: windows(30, 20), readAt: NOW }
+  await clock.advance(10 * 60_000)
+  expect(await (await band($)).find({ type: 'Text', text: /as of|Session|pause off/ })).toBeUndefined()
+})
+
+test(
+  'with only the pause-off tag on the line, old figures are not dated',
+  { options: { ...PAUSING, show_at: 90 } },
+  async ($, on) => {
+    // GUARDS: an "as of" time with no figures beside it when show_at hides every limit.
+    const saved: Record<string, unknown> = {
+      overrideUntil: Date.parse(SESSION_RESET),
+      reading: { limits: windows(30, 20), readAt: NOW },
+    }
+    on('state.get', ($, e) => ({ value: { value: saved[e.key], version: 1 } }))
+    const { clock } = engine(on, [])
+    await $.session.start(START)
+    await clock.advance(10 * 60_000)
+    const ui = await band($)
+    expect(await ui.find({ type: 'Text', text: '○ pause off until 4:10 AM CT' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^as of/ })).toBeUndefined()
+  },
+)
 
 // ---- Settings and formatting ----
 

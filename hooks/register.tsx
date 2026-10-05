@@ -184,23 +184,53 @@ async function cancelPause($: EngineInterface): Promise<void> {
   if (held !== null) await setPause($, null)
 }
 
-// Saves the first-run choice as the show_at setting, where /config shows and changes it.
+// The first-run choice: shown until someone on this computer has saved one.
+let needsChoice = false
+// A choice made while a turn runs, saved when the main turn ends: saving reloads this module.
+let pendingShowAt: number | null = null
+
 async function chooseShowAt($: EngineInterface, percent: number): Promise<void> {
   showAt = percent
-  await $.store.set(ONBOARDED_KEY, true)
   await $.state.set(ONBOARDING, null)
-  const saved = await $.config.set({ key: 'plan-usage.show_at', value: percent })
-  if (saved.deny !== undefined) $.ui.log(`show_at could not be saved (${saved.deny}); set it in /config`)
-  $.ui.toast(
-    percent === 0
-      ? 'Plan usage: always shown. Change it in /config.'
-      : `Plan usage: shown from ${percent}%. Change it in /config.`,
-  )
+  if (turnId !== null) {
+    pendingShowAt = percent
+    $.ui.toast(`Plan usage: ${shownFrom(percent)}. Saved when this turn ends.`)
+    return
+  }
+  await saveShowAt($, percent)
+}
+
+function shownFrom(percent: number): string {
+  return percent === 0 ? 'always shown' : `shown from ${percent}%`
+}
+
+// Saves show_at where /config shows it. The key is "<plugin name>.<field>", read live under a marketplace
+// install (plan-usage@potterdigital) on Claude Code 2.1.289. Saving reloads the module, so the done flag is
+// written first and taken back if the save is refused.
+async function saveShowAt($: EngineInterface, percent: number): Promise<void> {
+  pendingShowAt = null
+  await $.store.set(ONBOARDED_KEY, true)
+  let refusal: string | undefined
+  try {
+    refusal = (await $.config.set({ key: 'plan-usage.show_at', value: percent })).deny
+  } catch (error) {
+    refusal = String(error)
+  }
+  if (refusal !== undefined) {
+    await $.store.set(ONBOARDED_KEY, false)
+    const retry: PlanUsageOnboarding = { step: 'choose', note: 'Could not save that. Choose again, or set show_at in /config.' }
+    await $.state.set(ONBOARDING, retry)
+    $.ui.log(`show_at was not saved: ${refusal}`)
+    return
+  }
+  needsChoice = false
+  $.ui.toast(`Plan usage: ${shownFrom(percent)}. Change it in /config.`)
 }
 
 async function submitOtherPercent($: EngineInterface, text: string): Promise<void> {
-  const percent = Number(text.trim())
-  if (text.trim() === '' || !Number.isInteger(percent) || percent < 0 || percent > 100) {
+  const entry = text.trim()
+  const percent = Number(entry)
+  if (!/^\d{1,3}$/.test(entry) || percent > 100) {
     const retry: PlanUsageOnboarding = { step: 'other', note: 'Enter a whole number from 0 to 100.' }
     await $.state.set(ONBOARDING, retry)
     return
@@ -259,7 +289,8 @@ export const register: Register = (on, options) => {
       autoPause = false
       $.ui.log('auto_pause is off in this session: it runs only where a person is at the prompt')
     }
-    if (e.isInteractive && (await $.store.get(ONBOARDED_KEY)) !== true) {
+    needsChoice = e.isInteractive && (await $.store.get(ONBOARDED_KEY)) !== true
+    if (needsChoice) {
       const choose: PlanUsageOnboarding = { step: 'choose' }
       await $.state.set(ONBOARDING, choose)
     }
@@ -290,6 +321,10 @@ export const register: Register = (on, options) => {
     await cancelPause($)
     if (latest !== null) await $.state.set(READING, latest)
     if (overrideUntil > 0) await $.state.set(OVERRIDE, overrideUntil)
+    if (needsChoice) {
+      const choose: PlanUsageOnboarding = { step: 'choose' }
+      await $.state.set(ONBOARDING, choose)
+    }
     return next(e)
   })
 
@@ -323,6 +358,7 @@ export const register: Register = (on, options) => {
     // Subagent turns complete with agentId set and do not end the main turn.
     if (e.agentId === undefined && e.turnId === turnId) {
       turnId = null
+      if (pendingShowAt !== null) await saveShowAt($, pendingShowAt)
       if (held !== null && held.phase === 'pending') {
         if (wasRefused) {
           // The pause refused a tool call, so the work stopped early: continue it after the reset.
@@ -364,88 +400,87 @@ export const register: Register = (on, options) => {
     const now = await $.clock.now()
     const { Box, Text } = $.ui.resolve(e)
     const isNarrow = e.props.bodyColumns < 100
-    // The band is shared: keep what the mods after this one draw (Claude Code's own notes included) under this line.
+    // The band is shared: keep what the mods after this one draw (Claude Code's own notes included) under these lines.
     const theirs = await next(e)
 
-    // The first-run choice needs a text field, which the terminal and the desktop app have.
+    // The first-run choice, above the usage line. It needs a text field, which the terminal and the desktop app have.
+    let choice = null
     if (onboarding !== null && (e.surface === 'terminal' || e.surface === 'desktop')) {
       const { Button, Input } = $.ui.resolve(e)
-      return (
-        <Box flexDirection="column">
-          {onboarding.step === 'choose' ? (
-            <Box flexDirection="row" columnGap={2}>
-              <Text>Plan usage: show your limits above the prompt</Text>
-              <Button key="show-always" label="Always" hotkey="1" plain onPress={() => chooseShowAt($, 0)} />
-              <Button key="show-50" label="From 50%" hotkey="2" plain onPress={() => chooseShowAt($, 50)} />
-              <Button key="show-80" label="From 80%" hotkey="3" plain onPress={() => chooseShowAt($, 80)} />
-              <Button key="show-other" label="Other" hotkey="4" plain onPress={() => askOtherPercent($)} />
-            </Box>
-          ) : (
-            <Box flexDirection="row" columnGap={2}>
-              <Input
-                key="show-at"
-                label="Plan usage: show limits from what percent"
-                placeholder="0 to 100"
-                value=""
-                submitLabel="save"
-                autoFocus
-                onSubmit={(text: string) => submitOtherPercent($, text)}
-              />
-              {onboarding.note === undefined ? null : <Text>{onboarding.note}</Text>}
-            </Box>
-          )}
-          {theirs}
-        </Box>
-      )
+      choice =
+        onboarding.step === 'choose' ? (
+          <Box flexDirection="row" columnGap={2}>
+            <Text>Plan usage: show your limits above the prompt</Text>
+            <Button key="show-always" label="Always" hotkey="1" plain onPress={() => chooseShowAt($, 0)} />
+            <Button key="show-50" label="From 50%" hotkey="2" plain onPress={() => chooseShowAt($, 50)} />
+            <Button key="show-80" label="From 80%" hotkey="3" plain onPress={() => chooseShowAt($, 80)} />
+            <Button key="show-other" label="Other" hotkey="4" plain onPress={() => askOtherPercent($)} />
+            {onboarding.note === undefined ? null : <Text>{onboarding.note}</Text>}
+          </Box>
+        ) : (
+          <Box flexDirection="row" columnGap={2}>
+            <Input
+              key="show-at"
+              label="Plan usage: show limits from what percent"
+              placeholder="0 to 100"
+              value=""
+              submitLabel="save"
+              autoFocus
+              onSubmit={(text: string) => submitOtherPercent($, text)}
+            />
+            {onboarding.note === undefined ? null : <Text>{onboarding.note}</Text>}
+          </Box>
+        )
     }
 
+    let usage = null
     if (current === null) {
-      if (showAt > 0) return theirs
-      return (
-        <Box flexDirection="column">
-          <Text wrap="truncate-end">◌ Plan usage: no reading yet (it appears after the first reply)</Text>
-          {theirs}
-        </Box>
-      )
+      if (showAt === 0) usage = <Text wrap="truncate-end">◌ Plan usage: no reading yet (it appears after the first reply)</Text>
+    } else {
+      const shown = BAND_KINDS.flatMap(kind => current.limits.filter(limit => limit.kind === kind && limit.percentUsed >= showAt))
+      const isStale = now - current.readAt > STALE_MS
+      const isOverridden = autoPause && pausing === null && now < pauseOffUntil
+      // Below show_at, with nothing paused or overridden, the usage line steps aside.
+      if (shown.length > 0 || pausing !== null || isOverridden) {
+        usage = (
+          <Box flexDirection="row" columnGap={3}>
+            {pausing === null ? null : (
+              <Text color={ORANGE} bold wrap="truncate-end">
+                ⏸ PAUSED at {pausing.percentUsed}% · continues {time.at(pausing.resumeAt, now)}
+              </Text>
+            )}
+            {shown.map(limit => {
+              const look = lookOf(limit.percentUsed, warnAt)
+              const at = resetsAtMs(limit)
+              const resets =
+                at === undefined
+                  ? ''
+                  : isNarrow
+                    ? ` · ${formatIn(at - now)}`
+                    : ` · resets ${time.at(at, now)} (${formatIn(at - now)})`
+              return (
+                <Box key={limit.kind} flexDirection="row" columnGap={1}>
+                  <Text color={look.color} bold>
+                    {look.icon} {look.word}
+                  </Text>
+                  <Text wrap="truncate-end">
+                    {labelOf(limit.kind)} {limit.percentUsed}%{resets}
+                  </Text>
+                </Box>
+              )
+            })}
+            {isOverridden ? <Text wrap="truncate-end">○ pause off until {time.at(pauseOffUntil, now)}</Text> : null}
+            {isStale && shown.length > 0 ? <Text wrap="truncate-end">as of {time.at(current.readAt, now)}</Text> : null}
+          </Box>
+        )
+      }
     }
 
-    const shown = BAND_KINDS.flatMap(kind => current.limits.filter(limit => limit.kind === kind && limit.percentUsed >= showAt))
-    const isStale = now - current.readAt > STALE_MS
-    const isOverridden = autoPause && pausing === null && now < pauseOffUntil
-    // Below show_at, and with nothing paused or overridden, the line steps aside entirely.
-    if (shown.length === 0 && pausing === null && !isOverridden) return theirs
-
+    if (choice === null && usage === null) return theirs
     return (
       <Box flexDirection="column">
-        <Box flexDirection="row" columnGap={3}>
-          {pausing === null ? null : (
-            <Text color={ORANGE} bold wrap="truncate-end">
-              ⏸ PAUSED at {pausing.percentUsed}% · continues {time.at(pausing.resumeAt, now)}
-            </Text>
-          )}
-          {shown.map(limit => {
-            const look = lookOf(limit.percentUsed, warnAt)
-            const at = resetsAtMs(limit)
-            const resets =
-              at === undefined
-                ? ''
-                : isNarrow
-                  ? ` · ${formatIn(at - now)}`
-                  : ` · resets ${time.at(at, now)} (${formatIn(at - now)})`
-            return (
-              <Box key={limit.kind} flexDirection="row" columnGap={1}>
-                <Text color={look.color} bold>
-                  {look.icon} {look.word}
-                </Text>
-                <Text wrap="truncate-end">
-                  {labelOf(limit.kind)} {limit.percentUsed}%{resets}
-                </Text>
-              </Box>
-            )
-          })}
-          {isOverridden ? <Text wrap="truncate-end">○ pause off until {time.at(pauseOffUntil, now)}</Text> : null}
-          {isStale && shown.length > 0 ? <Text wrap="truncate-end">as of {time.at(current.readAt, now)}</Text> : null}
-        </Box>
+        {choice}
+        {usage}
         {theirs}
       </Box>
     )
