@@ -21,6 +21,7 @@ import type { TimeFormat } from './usage'
 // below are what the logic trusts, and each change is written through to $.state.
 const READING = { plugin: 'plan-usage', key: 'reading' } as const
 const PAUSE = { plugin: 'plan-usage', key: 'pause' } as const
+const OVERRIDE = { plugin: 'plan-usage', key: 'overrideUntil' } as const
 
 const TOOL = 'mcp__plan-usage__plan_usage'
 // How often an idle session looks for a newer reading another session stored. A local file read.
@@ -31,6 +32,7 @@ const STALE_MS = 5 * 60_000
 const BAND_KINDS = ['five_hour', 'seven_day']
 
 let warnAt = 80
+let showAt = 0
 let autoPause = false
 let threshold = 95
 let resumePrompt = ''
@@ -56,6 +58,11 @@ async function setReading($: EngineInterface, next: PlanUsageReading | null): Pr
 async function setPause($: EngineInterface, next: PlanUsagePause | null): Promise<void> {
   held = next
   await $.state.set(PAUSE, next)
+}
+
+async function setOverride($: EngineInterface, until: number): Promise<void> {
+  overrideUntil = until
+  await $.state.set(OVERRIDE, until)
 }
 
 // Plan limits are per login. The store file is per configuration directory, but a machine can point several
@@ -122,9 +129,11 @@ async function checkPause($: EngineInterface): Promise<void> {
 // Ends the running turn and waits for the reset.
 async function stopTurn($: EngineInterface): Promise<void> {
   if (held === null || held.phase !== 'pending') return
+  // A prompt can cancel the pause while the abort is awaited, so work from this copy.
+  const pause: PlanUsagePause = { ...held, phase: 'waiting' }
   const stopping = turnId
   turnId = null
-  await setPause($, { ...held, phase: 'waiting' })
+  await setPause($, pause)
   if (stopping !== null) {
     try {
       await $.turn.abort({ turnId: stopping })
@@ -134,7 +143,7 @@ async function stopTurn($: EngineInterface): Promise<void> {
   }
   const now = await $.clock.now()
   $.ui.log(
-    `paused at ${held.percentUsed}% of the session limit; continuing at ${time.at(held.resumeAt, now)}. Send a prompt yourself to cancel.`,
+    `paused at ${pause.percentUsed}% of the session limit; continuing at ${time.at(pause.resumeAt, now)}. Send a prompt yourself to cancel.`,
   )
   await armResume($)
 }
@@ -195,6 +204,7 @@ async function report($: EngineInterface): Promise<string> {
 
 export const register: Register = (on, options) => {
   warnAt = typeof options.warn_at === 'number' ? options.warn_at : 80
+  showAt = typeof options.show_at === 'number' ? options.show_at : 0
   autoPause = options.auto_pause === true
   threshold = typeof options.pause_threshold === 'number' ? options.pause_threshold : 95
   resumePrompt =
@@ -210,6 +220,7 @@ export const register: Register = (on, options) => {
     // After a hot reload, pick up what the previous copy of this module held.
     latest = (await $.state.get(READING)).value ?? null
     held = (await $.state.get(PAUSE)).value ?? null
+    overrideUntil = (await $.state.get(OVERRIDE)).value ?? 0
     if (zoneWarning !== '') $.ui.log(zoneWarning)
     if (autoPause && !e.isInteractive) {
       // A claude -p run or SDK host ends with its turn, so a paused run could never continue.
@@ -242,18 +253,18 @@ export const register: Register = (on, options) => {
     turnId = null
     await cancelPause($)
     if (latest !== null) await $.state.set(READING, latest)
+    if (overrideUntil > 0) await $.state.set(OVERRIDE, overrideUntil)
     return next(e)
   })
 
-  // A person at the keyboard outranks the pause: their prompt cancels it, and pausing stays off until the
-  // session window resets, as with Claude Code's own wait.
-  // Origins that mean a person sent the prompt: typed at the terminal (composer) or through Remote Control (bridge).
-  on('prompt.submit', { origin: { kind: /^(composer|bridge)$/ } }, async ($, e, next) => {
-    const hit = latest === null ? undefined : pauseTrigger(latest.limits, threshold)
-    if (held !== null || (autoPause && hit !== undefined)) {
-      const resetsAt = hit === undefined ? undefined : resetsAtMs(hit)
-      overrideUntil = Math.max(overrideUntil, resetsAt ?? 0, held?.resumeAt ?? 0)
-      if (held !== null) $.ui.toast('Pause cancelled: you sent a prompt')
+  // A person outranks the pause. A prompt they send that starts its own turn (one typed while a turn runs is
+  // queued into it, and leaves the pause alone) cancels a pause, and pausing stays off until the session window
+  // resets. A prompt sent past the threshold with no pause yet is paused at turn.start like any other, so the
+  // override is always a deliberate second prompt. Origins: the terminal, Remote Control, and the owner on Slack.
+  on('prompt.submit', { origin: { kind: /^(composer|bridge|slack-ping)$/ } }, async ($, e, next) => {
+    if (held !== null && e.turnId === undefined) {
+      await setOverride($, Math.max(overrideUntil, held.resumeAt - RESUME_DELAY_MS))
+      $.ui.toast(`Pause cancelled: you sent a prompt. No pausing until ${time.at(overrideUntil, await $.clock.now())}.`)
       await cancelPause($)
     }
     return next(e)
@@ -312,6 +323,7 @@ export const register: Register = (on, options) => {
     if (e.props.hasSurvey) return next(e)
     const current = (await $.state.get(READING)).value ?? null
     const pausing = (await $.state.get(PAUSE)).value ?? null
+    const pauseOffUntil = (await $.state.get(OVERRIDE)).value ?? 0
     const now = await $.clock.now()
     const { Box, Text } = $.ui.resolve(e)
     const isNarrow = e.props.bodyColumns < 100
@@ -319,6 +331,7 @@ export const register: Register = (on, options) => {
     const theirs = await next(e)
 
     if (current === null) {
+      if (showAt > 0) return theirs
       return (
         <Box flexDirection="column">
           <Text wrap="truncate-end">◌ Plan usage: no reading yet (it appears after the first reply)</Text>
@@ -327,8 +340,11 @@ export const register: Register = (on, options) => {
       )
     }
 
-    const shown = BAND_KINDS.flatMap(kind => current.limits.filter(limit => limit.kind === kind))
+    const shown = BAND_KINDS.flatMap(kind => current.limits.filter(limit => limit.kind === kind && limit.percentUsed >= showAt))
     const isStale = now - current.readAt > STALE_MS
+    const isOverridden = autoPause && pausing === null && now < pauseOffUntil
+    // Below show_at, and with nothing paused or overridden, the line steps aside entirely.
+    if (shown.length === 0 && pausing === null && !isOverridden) return theirs
 
     return (
       <Box flexDirection="column">
@@ -358,7 +374,8 @@ export const register: Register = (on, options) => {
               </Box>
             )
           })}
-          {isStale ? <Text wrap="truncate-end">as of {time.at(current.readAt, now)}</Text> : null}
+          {isOverridden ? <Text wrap="truncate-end">○ pause off until {time.at(pauseOffUntil, now)}</Text> : null}
+          {isStale && shown.length > 0 ? <Text wrap="truncate-end">as of {time.at(current.readAt, now)}</Text> : null}
         </Box>
         {theirs}
       </Box>

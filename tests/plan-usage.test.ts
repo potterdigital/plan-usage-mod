@@ -1,4 +1,4 @@
-// Budget: 25 tests, under 3 seconds together. Fakes only Claude Code's answers and the clock.
+// Budget: 32 tests, under 3 seconds together. Fakes only Claude Code's answers and the clock.
 import type { UsageUnit } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 import type { MockClock, TestBody } from 'claude-code/testing'
@@ -69,7 +69,8 @@ function engine(on: On, replyWindows: Window[]): Fake {
     return { value: undefined }
   })
   on('prompt.submit', ($, e) => {
-    if (e.origin?.kind !== 'composer') calls.submitted.push(e.text)
+    // Only prompts this mod sends; the ones a person sends in a test are not continues.
+    if (!['composer', 'bridge', 'slack-ping'].includes(String(e.origin?.kind))) calls.submitted.push(e.text)
     return { text: e.text }
   })
   on('session.start', () => ({ cwd: '/work' }))
@@ -379,6 +380,106 @@ test(
     expect(calls.submitted).toEqual([])
   },
 )
+
+test(
+  'a prompt sent past the threshold is paused at once, and a second prompt is the override',
+  { options: PAUSING },
+  async ($, on) => {
+    // GUARDS: a prompt sent at 96% silently turning the pause off for the window (round-two finding 1).
+    const { calls } = engine(on, windows(50, 20))
+    await $.session.start(START)
+    await $.session.measure(measured(96, 20))
+    await $.prompt.submit({ text: 'start the overnight run', wait: false, origin: { kind: 'composer' } })
+    await $.turn.start({ text: 'start the overnight run', turnId: 't1' })
+    expect(calls.aborted).toEqual(['t1'])
+    await $.prompt.submit({ text: 'go anyway', wait: false, origin: { kind: 'composer' } })
+    await $.turn.start({ text: 'go anyway', turnId: 't2' })
+    expect(calls.aborted).toEqual(['t1'])
+    expect(await (await band($)).find({ type: 'Text', text: '○ pause off until 4:10 AM CT' })).toBeDefined()
+  },
+)
+
+test('a prompt queued into the running turn leaves its pending pause alone', { options: PAUSING }, async ($, on) => {
+  // GUARDS: "also update the changelog" typed mid-turn cancelling the pause (round-two finding 3).
+  const { clock, calls } = engine(on, windows(50, 20))
+  const { running } = await pauseDuringTool($, clock)
+  await $.prompt.submit({ text: 'also update the changelog', wait: true, turnId: 't1', origin: { kind: 'composer' } })
+  await clock.advance(60_000)
+  await running
+  expect(calls.aborted).toEqual(['t1'])
+})
+
+test("the owner's message from Slack cancels a waiting pause", { options: PAUSING }, async ($, on) => {
+  // GUARDS: the session's owner, writing from Slack, finding every tool call refused until the reset.
+  const { clock, calls } = engine(on, windows(50, 20))
+  await $.session.start(START)
+  await $.turn.start({ text: 'work', turnId: 't1' })
+  await $.session.measure(measured(96, 20))
+  await $.prompt.submit({ text: 'carry on', wait: false, origin: { kind: 'slack-ping' } })
+  await clock.set(Date.parse(SESSION_RESET) + 10 * 60_000)
+  expect(calls.submitted).toEqual([])
+})
+
+test('after a reload, a waiting pause is picked up again and continues on time', { options: PAUSING }, async ($, on) => {
+  // GUARDS: a hot reload losing the waiting continue (the module restarts; $.state keeps the pause).
+  const resumeAt = Date.parse(SESSION_RESET) + 120_000
+  const saved: Record<string, unknown> = { pause: { phase: 'waiting', percentUsed: 96, resumeAt } }
+  on('state.get', ($, e) => ({ value: { value: saved[e.key], version: 1 } }))
+  const { clock, calls } = engine(on, [])
+  await $.session.start(START)
+  await clock.set(resumeAt - 1_000)
+  expect(calls.submitted).toEqual([])
+  await clock.advance(1_000)
+  expect(calls.submitted).toEqual([RESUME_TEXT])
+})
+
+test('after a reload, the band keeps the last reading', { options: CHICAGO }, async ($, on) => {
+  // GUARDS: a hot reload blanking the line until the next reply.
+  const saved: Record<string, unknown> = { reading: { limits: windows(77, 30), readAt: NOW } }
+  on('state.get', ($, e) => ({ value: { value: saved[e.key], version: 1 } }))
+  engine(on, [])
+  await $.session.start(START)
+  const out = await answer($)
+  expect(out.limits[0]).toMatchObject({ percentUsed: 77 })
+})
+
+test(
+  'show_at hides a limit until it reaches the setting, and the whole line when none has',
+  { options: { ...CHICAGO, show_at: 50 } },
+  async ($, on) => {
+    // GUARDS: the line showing below the chosen level, or hiding a limit that has reached it.
+    engine(on, windows(30, 20))
+    await $.session.start(START)
+    const quiet = await band($)
+    expect(await quiet.find({ type: 'Text', text: /Session|Weekly|no reading/ })).toBeUndefined()
+    expect(await quiet.find({ type: 'Text', text: 'a note from another mod' })).toBeDefined()
+    await quiet.unmount()
+    await $.session.measure(measured(55, 20))
+    const shown = await band($)
+    expect(await shown.find({ type: 'Text', text: /^Session 55%/ })).toBeDefined()
+    expect(await shown.find({ type: 'Text', text: /^Weekly/ })).toBeUndefined()
+  },
+)
+
+test('the pause-off override survives a reload and a /clear', { options: PAUSING }, async ($, on) => {
+  // GUARDS: a reload or /clear quietly re-arming the pause, or hiding the "pause off" tag, after the person overrode it.
+  const saved = new Map<string, unknown>([['overrideUntil', Date.parse(SESSION_RESET)]])
+  on('state.get', ($, e) => ({ value: { value: saved.get(e.key), version: 1 } }))
+  on('state.set', ($, e) => {
+    saved.set(e.key, e.value)
+    return { value: { isSet: true, version: 2 } }
+  })
+  const { calls } = engine(on, windows(50, 20))
+  await $.session.start(START)
+  await $.turn.start({ text: 'work', turnId: 't1' })
+  await $.session.measure(measured(97, 20))
+  expect(calls.aborted).toEqual([])
+  // /clear resets the session's state to its defaults; the override has to be written back.
+  saved.clear()
+  await $.classic.SessionStart({ source: 'clear' })
+  expect(saved.get('overrideUntil')).toBe(Date.parse(SESSION_RESET))
+  expect(await (await band($)).find({ type: 'Text', text: '○ pause off until 4:10 AM CT' })).toBeDefined()
+})
 
 test(
   'a turn that was refused a tool call and then ended by itself still continues after the reset',

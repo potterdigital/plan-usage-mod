@@ -22,23 +22,26 @@ claude plugin marketplace add potterdigital/plan-usage-mod
 claude plugin install plan-usage@potterdigital
 ```
 
-The install may print `5 userConfig options not yet set`. Every setting has a default, so you can ignore it until you want to change one.
+If the install mentions userConfig options not yet set, that is fine: every setting has a default.
 
-From inside a session, `/plugin install plan-usage --marketplace potterdigital/plan-usage-mod` adds the marketplace and opens the install for you to confirm.
+From inside a session, `/plugin install plan-usage --marketplace potterdigital/plan-usage-mod` asks you to confirm the marketplace, then opens the plugin so you can choose where to install it.
 
 To try it without installing, clone the repository and start a session with `claude --plugin-dir ./plan-usage-mod`.
 
 ## What you see
 
-| Line shows                               | Means                                              |
-| ---------------------------------------- | -------------------------------------------------- |
-| `● OK` in blue                           | Under the warning level (80% unless you change it) |
-| `▲ HIGH` in orange                       | At or above the warning level                      |
-| `■ LIMIT` in orange                      | At or past 100%                                    |
-| `⏸ PAUSED at 96% · continues 4:12 AM CT` | The optional pause is holding the session          |
-| `as of 2:31 AM CT`                       | The newest figures are more than 5 minutes old     |
+| Line shows                               | Means                                                   |
+| ---------------------------------------- | ------------------------------------------------------- |
+| `● OK` in blue                           | Under the warning level (80% unless you change it)      |
+| `▲ HIGH` in orange                       | At or above the warning level                           |
+| `■ LIMIT` in orange                      | At or past 100%                                         |
+| `⏸ PAUSED at 96% · continues 4:12 AM CT` | The optional pause is holding the session               |
+| `as of 2:31 AM CT`                       | The newest figures are more than 5 minutes old          |
+| `○ pause off until 4:10 AM CT`           | You overrode the optional pause for this session window |
 
 Every level has its own icon and word as well as its color, so it reads the same for colorblind users.
+
+To keep the line out of the way until it matters, set `show_at`: with `50`, a limit appears only once it reaches 50%, and the line is empty while neither has.
 
 In a narrow terminal (under about 105 columns) the line shortens to the time left, as in `Session 9% · 3h 55m`. What mods that run after this one draw in the same place, Claude Code's own notices included, stays visible below this line.
 
@@ -103,9 +106,9 @@ When it is on and the session limit reaches the threshold (95% unless you change
 2. The turn ends.
 3. Two minutes after the session limit resets, the mod sends the session a prompt to continue: `Plan usage reset; resume where you left off from the files on disk.` Claude reads it with a note that this mod sent it, not you.
 
-The check runs whenever new figures arrive during a turn and when each turn starts, so a `/loop` or queued turn that starts past the threshold is paused at once. If a turn finishes on its own before anything was refused, nothing is continued later.
+The check runs whenever new figures arrive during a turn and when each turn starts, so a turn that starts past the threshold, including one you start, a `/loop` iteration or a queued prompt, is stopped before Claude answers, and the line shows PAUSED. If a turn finishes on its own before anything was refused, nothing is continued later.
 
-**You stay in charge.** A prompt you send yourself, at the terminal or through Remote Control, cancels a pending or waiting pause, and the mod does not pause again until that session window resets. `/clear`, `/resume`, `/branch` and closing the session also cancel a waiting continue.
+**You stay in charge.** While a pause is in place, a prompt you send yourself cancels it, and the mod does not pause again until that session window resets; the line shows `○ pause off until` and the reset time. That counts prompts typed at the terminal, sent through Remote Control, or sent from Slack as the session's owner. A message you type while a turn is still running is queued into that turn and does not cancel anything. `/clear`, `/resume`, `/branch` and closing the session also cancel a waiting continue.
 
 The pause watches the session limit only. If the weekly limit is what runs out, the continuing prompt meets that limit instead.
 
@@ -130,6 +133,7 @@ With `--plugin-dir`, the key is `plan-usage@inline`.
 | Setting           | Default   | What it does                                                                                                                                                                                            |
 | ----------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `warn_at`         | `80`      | Percent at which the line turns orange and reads HIGH                                                                                                                                                   |
+| `show_at`         | `0`       | Show a limit on the line only from this percent. `0` shows it always.                                                                                                                                   |
 | `time_zone`       | empty     | IANA time zone for reset times, such as `America/New_York`. Empty uses your computer's. An invalid name falls back to your computer's, with a note in the session and a `warning` in the tool's answer. |
 | `auto_pause`      | `false`   | Turns the pause on                                                                                                                                                                                      |
 | `pause_threshold` | `95`      | Session-limit percent that starts the pause                                                                                                                                                             |
@@ -149,7 +153,7 @@ Zones without a short name show as an offset, such as `9:00 AM GMT+1` for London
 ## Development
 
 ```sh
-claude plugin test .                 # 25 tests, under 3 seconds
+claude plugin test .                 # 32 tests, under 3 seconds
 claude plugin validate --strict .    # what Claude Code will load, warnings as errors
 npx prettier --check .
 ```

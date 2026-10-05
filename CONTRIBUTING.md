@@ -21,7 +21,11 @@ A reload restarts the module but keeps the session's `$.state`, so the reading a
 - Each test names the regression it guards in a `// GUARDS:` comment.
 - Tests fake only what Claude Code answers and the clock (`claude-code/testing`).
 - Keep the suite fast: under 3 seconds.
-- Every behavior the README promises has a test that fails when the code behind it is removed. The one exception is restoring the reading and the pause after a hot reload: the test kit loads the module fresh for each test and offers no way to seed `$.state`, so check that by hand.
+- Every behavior the README promises has a test that fails when the code behind it is removed. To test what survives a hot reload or `/clear`, answer the `state.get` event in the test (`on('state.get', ($, e) => ({ value: { value: saved, version: 1 } }))`); the kit loads the module fresh for each test.
+
+## CI
+
+CI checks every push and pull request against the Claude Code version in the README, and runs weekly against the newest release. GitHub turns scheduled runs off after 60 days without activity in a repository; re-enable the workflow or run it by hand from the Actions tab.
 
 ## Style
 

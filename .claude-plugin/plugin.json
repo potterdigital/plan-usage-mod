@@ -2,8 +2,11 @@
   "name": "plan-usage",
   "displayName": "Plan Usage",
   "version": "0.1.0",
-  "description": "Shows your Claude plan's session and weekly limits above the prompt, gives Claude a plan_usage tool to check them at no token cost, and can pause a long-running session before the session limit and continue after it resets.",
-  "author": { "name": "Brian Potter", "url": "https://github.com/potterdigital" },
+  "description": "Shows your Claude plan's session and weekly limits above the prompt, gives Claude a plan_usage tool to check them without a model call, and can pause a long-running session before the session limit and continue after it resets.",
+  "author": {
+    "name": "Brian Potter",
+    "url": "https://github.com/potterdigital"
+  },
   "homepage": "https://github.com/potterdigital/plan-usage-mod",
   "repository": "https://github.com/potterdigital/plan-usage-mod",
   "license": "MIT",
@@ -16,6 +19,14 @@
       "description": "From this percent of a limit, the band turns orange and reads HIGH.",
       "default": 80,
       "min": 1,
+      "max": 100
+    },
+    "show_at": {
+      "type": "number",
+      "title": "Show from (percent)",
+      "description": "Show a limit on the line only once it reaches this percent. 0 shows it always.",
+      "default": 0,
+      "min": 0,
       "max": 100
     },
     "time_zone": {

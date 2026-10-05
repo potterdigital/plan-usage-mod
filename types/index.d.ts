@@ -24,6 +24,8 @@ declare module 'claude-code' {
     'plan-usage': {
       reading: PlanUsageReading | null
       pause: PlanUsagePause | null
+      // When a person cancelled a pause: no pausing again before this time (ms since the epoch); 0 when none.
+      overrideUntil: number
     }
   }
 }
