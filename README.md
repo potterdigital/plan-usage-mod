@@ -155,7 +155,7 @@ Zones without a short name show as an offset, such as `9:00 AM GMT+1` for London
 ## Development
 
 ```sh
-claude plugin test .                 # 42 tests, under 3 seconds
+claude plugin test .                 # 44 tests, under 3 seconds
 claude plugin validate --strict .    # what Claude Code will load, warnings as errors
 npx prettier --check .
 ```

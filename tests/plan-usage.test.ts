@@ -1,4 +1,4 @@
-// Budget: 42 tests, under 3 seconds together. Fakes only Claude Code's answers and the clock.
+// Budget: 44 tests, under 3 seconds together. Fakes only Claude Code's answers and the clock.
 import type { UsageUnit } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 import type { MockClock, TestBody } from 'claude-code/testing'
@@ -637,6 +637,30 @@ test('the question comes back after /clear until it is answered', { options: CHI
   saved.clear()
   await $.classic.SessionStart({ source: 'clear' })
   expect(saved.get('onboarding')).toEqual({ step: 'choose' })
+})
+
+test('a choice made in a turn the pause then stops is saved right after the stop', { options: PAUSING }, async ($, on) => {
+  // GUARDS: the first-run choice vanishing because the stopped turn never reports a matching turn end (round-four finding).
+  const { calls } = engine(on, windows(50, 20), false)
+  await $.session.start(START)
+  await $.turn.start({ text: 'work', turnId: 't1' })
+  const ui = await band($)
+  await ui.press({ key: 'show-50' })
+  expect(calls.configured).toEqual([])
+  await $.session.measure(measured(96, 20))
+  expect(calls.aborted).toEqual(['t1'])
+  expect(calls.configured).toEqual([{ key: 'plan-usage.show_at', value: 50 }])
+})
+
+test('/clear with a choice waiting saves it instead of asking again', { options: CHICAGO }, async ($, on) => {
+  // GUARDS: a choice already made being thrown away and the question returning after /clear.
+  const { calls } = engine(on, windows(42, 63), false)
+  await $.session.start(START)
+  await $.turn.start({ text: 'work', turnId: 't1' })
+  const ui = await band($)
+  await ui.press({ key: 'show-80' })
+  await $.classic.SessionStart({ source: 'clear' })
+  expect(calls.configured).toEqual([{ key: 'plan-usage.show_at', value: 80 }])
 })
 
 test('no first-run line once someone chose, or in a claude -p run', { options: CHICAGO }, async ($, on) => {

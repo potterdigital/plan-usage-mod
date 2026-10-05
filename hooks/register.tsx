@@ -149,6 +149,8 @@ async function stopTurn($: EngineInterface): Promise<void> {
     `paused at ${pause.percentUsed}% of the session limit; continuing at ${time.at(pause.resumeAt, now)}. Send a prompt yourself to cancel.`,
   )
   await armResume($)
+  // The stopped turn's turn.complete no longer matches turnId, so a first-run choice it held is saved here.
+  if (pendingShowAt !== null) await saveShowAt($, pendingShowAt)
 }
 
 async function armResume($: EngineInterface): Promise<void> {
@@ -321,7 +323,9 @@ export const register: Register = (on, options) => {
     await cancelPause($)
     if (latest !== null) await $.state.set(READING, latest)
     if (overrideUntil > 0) await $.state.set(OVERRIDE, overrideUntil)
-    if (needsChoice) {
+    if (pendingShowAt !== null) {
+      await saveShowAt($, pendingShowAt)
+    } else if (needsChoice) {
       const choose: PlanUsageOnboarding = { step: 'choose' }
       await $.state.set(ONBOARDING, choose)
     }
@@ -358,7 +362,6 @@ export const register: Register = (on, options) => {
     // Subagent turns complete with agentId set and do not end the main turn.
     if (e.agentId === undefined && e.turnId === turnId) {
       turnId = null
-      if (pendingShowAt !== null) await saveShowAt($, pendingShowAt)
       if (held !== null && held.phase === 'pending') {
         if (wasRefused) {
           // The pause refused a tool call, so the work stopped early: continue it after the reset.
@@ -370,6 +373,8 @@ export const register: Register = (on, options) => {
         }
       }
     }
+    // Last: saving the first-run choice reloads the module, so the pause above is settled first.
+    if (e.agentId === undefined && pendingShowAt !== null && turnId === null) await saveShowAt($, pendingShowAt)
     return next(e)
   })
 
