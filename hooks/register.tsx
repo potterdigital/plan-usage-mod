@@ -1,6 +1,6 @@
 import type { EngineInterface, Register, SessionRateLimit, Timer } from 'claude-code'
 
-import type { PlanUsageLimit, PlanUsagePause, PlanUsageReading } from '../types'
+import type { PlanUsageLimit, PlanUsageOnboarding, PlanUsagePause, PlanUsageReading } from '../types'
 import {
   ORANGE,
   RESUME_DELAY_MS,
@@ -22,6 +22,9 @@ import type { TimeFormat } from './usage'
 const READING = { plugin: 'plan-usage', key: 'reading' } as const
 const PAUSE = { plugin: 'plan-usage', key: 'pause' } as const
 const OVERRIDE = { plugin: 'plan-usage', key: 'overrideUntil' } as const
+const ONBOARDING = { plugin: 'plan-usage', key: 'onboarding' } as const
+// Set in $.store once someone has chosen show_at on this machine, so the first-run line shows once.
+const ONBOARDED_KEY = 'onboarded'
 
 const TOOL = 'mcp__plan-usage__plan_usage'
 // How often an idle session looks for a newer reading another session stored. A local file read.
@@ -181,6 +184,35 @@ async function cancelPause($: EngineInterface): Promise<void> {
   if (held !== null) await setPause($, null)
 }
 
+// Saves the first-run choice as the show_at setting, where /config shows and changes it.
+async function chooseShowAt($: EngineInterface, percent: number): Promise<void> {
+  showAt = percent
+  await $.store.set(ONBOARDED_KEY, true)
+  await $.state.set(ONBOARDING, null)
+  const saved = await $.config.set({ key: 'plan-usage.show_at', value: percent })
+  if (saved.deny !== undefined) $.ui.log(`show_at could not be saved (${saved.deny}); set it in /config`)
+  $.ui.toast(
+    percent === 0
+      ? 'Plan usage: always shown. Change it in /config.'
+      : `Plan usage: shown from ${percent}%. Change it in /config.`,
+  )
+}
+
+async function submitOtherPercent($: EngineInterface, text: string): Promise<void> {
+  const percent = Number(text.trim())
+  if (text.trim() === '' || !Number.isInteger(percent) || percent < 0 || percent > 100) {
+    const retry: PlanUsageOnboarding = { step: 'other', note: 'Enter a whole number from 0 to 100.' }
+    await $.state.set(ONBOARDING, retry)
+    return
+  }
+  await chooseShowAt($, percent)
+}
+
+async function askOtherPercent($: EngineInterface): Promise<void> {
+  const other: PlanUsageOnboarding = { step: 'other' }
+  await $.state.set(ONBOARDING, other)
+}
+
 async function report($: EngineInterface): Promise<string> {
   await fromShared($)
   await fromLastReply($)
@@ -226,6 +258,10 @@ export const register: Register = (on, options) => {
       // A claude -p run or SDK host ends with its turn, so a paused run could never continue.
       autoPause = false
       $.ui.log('auto_pause is off in this session: it runs only where a person is at the prompt')
+    }
+    if (e.isInteractive && (await $.store.get(ONBOARDED_KEY)) !== true) {
+      const choose: PlanUsageOnboarding = { step: 'choose' }
+      await $.state.set(ONBOARDING, choose)
     }
     await fromShared($)
     await fromLastReply($)
@@ -324,11 +360,44 @@ export const register: Register = (on, options) => {
     const current = (await $.state.get(READING)).value ?? null
     const pausing = (await $.state.get(PAUSE)).value ?? null
     const pauseOffUntil = (await $.state.get(OVERRIDE)).value ?? 0
+    const onboarding = (await $.state.get(ONBOARDING)).value ?? null
     const now = await $.clock.now()
     const { Box, Text } = $.ui.resolve(e)
     const isNarrow = e.props.bodyColumns < 100
     // The band is shared: keep what the mods after this one draw (Claude Code's own notes included) under this line.
     const theirs = await next(e)
+
+    // The first-run choice needs a text field, which the terminal and the desktop app have.
+    if (onboarding !== null && (e.surface === 'terminal' || e.surface === 'desktop')) {
+      const { Button, Input } = $.ui.resolve(e)
+      return (
+        <Box flexDirection="column">
+          {onboarding.step === 'choose' ? (
+            <Box flexDirection="row" columnGap={2}>
+              <Text>Plan usage: show your limits above the prompt</Text>
+              <Button key="show-always" label="Always" hotkey="1" plain onPress={() => chooseShowAt($, 0)} />
+              <Button key="show-50" label="From 50%" hotkey="2" plain onPress={() => chooseShowAt($, 50)} />
+              <Button key="show-80" label="From 80%" hotkey="3" plain onPress={() => chooseShowAt($, 80)} />
+              <Button key="show-other" label="Other" hotkey="4" plain onPress={() => askOtherPercent($)} />
+            </Box>
+          ) : (
+            <Box flexDirection="row" columnGap={2}>
+              <Input
+                key="show-at"
+                label="Plan usage: show limits from what percent"
+                placeholder="0 to 100"
+                value=""
+                submitLabel="save"
+                autoFocus
+                onSubmit={(text: string) => submitOtherPercent($, text)}
+              />
+              {onboarding.note === undefined ? null : <Text>{onboarding.note}</Text>}
+            </Box>
+          )}
+          {theirs}
+        </Box>
+      )
+    }
 
     if (current === null) {
       if (showAt > 0) return theirs

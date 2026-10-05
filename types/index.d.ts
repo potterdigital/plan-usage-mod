@@ -19,6 +19,12 @@ export interface PlanUsagePause {
   resumeAt: number
 }
 
+// The first-run line that sets show_at; `note` explains a rejected entry.
+export interface PlanUsageOnboarding {
+  step: 'choose' | 'other'
+  note?: string
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'plan-usage': {
@@ -26,6 +32,8 @@ declare module 'claude-code' {
       pause: PlanUsagePause | null
       // When a person cancelled a pause: no pausing again before this time (ms since the epoch); 0 when none.
       overrideUntil: number
+      // The first-run choice of show_at: 'choose' offers the presets, 'other' asks for a percent.
+      onboarding: PlanUsageOnboarding | null
     }
   }
 }

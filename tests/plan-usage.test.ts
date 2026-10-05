@@ -1,4 +1,4 @@
-// Budget: 32 tests, under 3 seconds together. Fakes only Claude Code's answers and the clock.
+// Budget: 35 tests, under 3 seconds together. Fakes only Claude Code's answers and the clock.
 import type { UsageUnit } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 import type { MockClock, TestBody } from 'claude-code/testing'
@@ -32,6 +32,7 @@ function windows(session: number, weekly: number, sessionReset = SESSION_RESET):
 }
 
 interface Calls {
+  configured: Array<{ key: string; value: unknown }>
   aborted: string[]
   submitted: string[]
   logs: string[]
@@ -44,10 +45,11 @@ interface Fake {
 }
 
 // Every answer Claude Code would give; registered before the test's first $ call.
-function engine(on: On, replyWindows: Window[]): Fake {
+function engine(on: On, replyWindows: Window[], isOnboarded = true): Fake {
   const clock = mock.clock(on, { now: NOW })
-  const calls: Calls = { aborted: [], submitted: [], logs: [] }
-  const store = new Map<string, unknown>()
+  const calls: Calls = { configured: [], aborted: [], submitted: [], logs: [] }
+  // Tests other than the first-run ones start on a machine where show_at was already chosen.
+  const store = new Map<string, unknown>(isOnboarded ? [['onboarded', true]] : [])
   on('store.get', ($, e) => ({ value: store.get(e.key) }))
   on('store.set', ($, e) => {
     store.set(e.key, e.value)
@@ -64,6 +66,10 @@ function engine(on: On, replyWindows: Window[]): Fake {
     return { value: undefined }
   })
   on('ui.toast', () => ({ value: undefined }))
+  on('config.set', ($, e) => {
+    calls.configured.push({ key: e.key, value: e.value })
+    return { value: e.value }
+  })
   on('turn.abort', ($, e) => {
     calls.aborted.push(e.turnId)
     return { value: undefined }
@@ -537,6 +543,45 @@ test('auto-pause stays off in a claude -p run, which could never continue', { op
   await $.session.measure(measured(99, 20))
   expect(calls.aborted).toEqual([])
   expect(calls.logs).toContain('auto_pause is off in this session: it runs only where a person is at the prompt')
+})
+
+// ---- First run ----
+
+test('the first run offers a choice, and pressing 2 saves show_at 50 once', { options: CHICAGO }, async ($, on) => {
+  // GUARDS: the first-run line not saving the choice as the setting, or coming back after it was made.
+  const { calls, store } = engine(on, windows(42, 63), false)
+  await $.session.start(START)
+  const ui = await band($)
+  expect(await ui.find({ type: 'Text', text: 'Plan usage: show your limits above the prompt' })).toBeDefined()
+  await ui.press({ key: 'show-50' })
+  expect(calls.configured).toEqual([{ key: 'plan-usage.show_at', value: 50 }])
+  expect(store.get('onboarded')).toBe(true)
+  await ui.unmount()
+  const after = await band($)
+  expect(await after.find({ type: 'Text', text: /show your limits/ })).toBeUndefined()
+  expect(await after.find({ type: 'Text', text: /^Session/ })).toBeUndefined()
+})
+
+test('Other takes a typed percent and turns away one outside 0 to 100', { options: CHICAGO }, async ($, on) => {
+  // GUARDS: saving a nonsense show_at, or giving no hint when the entry is rejected.
+  const { calls } = engine(on, windows(42, 63), false)
+  await $.session.start(START)
+  const ui = await band($)
+  await ui.press({ key: 'show-other' })
+  await ui.input({ key: 'show-at', text: '150' })
+  expect(await ui.find({ type: 'Text', text: 'Enter a whole number from 0 to 100.' })).toBeDefined()
+  expect(calls.configured).toEqual([])
+  await ui.input({ key: 'show-at', text: '65' })
+  expect(calls.configured).toEqual([{ key: 'plan-usage.show_at', value: 65 }])
+})
+
+test('no first-run line once someone chose, or in a claude -p run', { options: CHICAGO }, async ($, on) => {
+  // GUARDS: the choice reappearing in every session, or a headless run waiting on a choice nobody can make.
+  engine(on, windows(42, 63), false)
+  await $.session.start({ surface: null, isInteractive: false, cwd: '/work' })
+  const ui = await band($)
+  expect(await ui.find({ type: 'Text', text: /show your limits/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^Session 42%/ })).toBeDefined()
 })
 
 // ---- Settings and formatting ----

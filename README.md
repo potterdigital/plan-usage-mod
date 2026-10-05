@@ -43,6 +43,8 @@ Every level has its own icon and word as well as its color, so it reads the same
 
 To keep the line out of the way until it matters, set `show_at`: with `50`, a limit appears only once it reaches 50%, and the line is empty while neither has.
 
+The first time the mod loads on a computer, the line asks once: `Plan usage: show your limits above the prompt  1: Always  2: From 50%  3: From 80%  4: Other`. Type the digit at an empty prompt, or click; Other asks for any whole percent. The choice is saved as `show_at`, so `/config` shows it and can change it, and the question does not come back. It is not asked in a `claude -p` run, and on surfaces without a text field (Remote Control on a phone) the usual line shows instead.
+
 In a narrow terminal (under about 105 columns) the line shortens to the time left, as in `Session 9% · 3h 55m`. What mods that run after this one draw in the same place, Claude Code's own notices included, stays visible below this line.
 
 ## The `plan_usage` tool
@@ -146,14 +148,14 @@ Zones without a short name show as an offset, such as `9:00 AM GMT+1` for London
 `claude plugin validate .` lists everything the mod hooks and calls. In short:
 
 - **Reads:** the plan figures Claude Code already has, and the `CLAUDE_CONFIG_DIR` environment variable, which keeps readings from different Claude profiles apart. It is told about each prompt you send, like every prompt hook, and uses only who sent it; it does not read, store or forward the text.
-- **Writes:** the last reading and any pause, to the session's own state, and the last reading to this mod's file in Claude Code's plugin store (`plugins/store/` in your Claude configuration directory, `~/.claude` by default).
+- **Writes:** your first-run choice, once, as this mod's own `show_at` setting; the last reading and any pause, to the session's own state, and the last reading to this mod's file in Claude Code's plugin store (`plugins/store/` in your Claude configuration directory, `~/.claude` by default).
 - **Acts:** when the pause is on, it refuses tool calls, ends a turn, and sends one prompt. Nothing else.
 - **Never:** network requests, other files, other environment variables, model calls.
 
 ## Development
 
 ```sh
-claude plugin test .                 # 32 tests, under 3 seconds
+claude plugin test .                 # 35 tests, under 3 seconds
 claude plugin validate --strict .    # what Claude Code will load, warnings as errors
 npx prettier --check .
 ```
