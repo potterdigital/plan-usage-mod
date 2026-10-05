@@ -44,6 +44,8 @@ let turnId: string | null = null
 let toolsRunning = 0
 // Set when the pause refused a tool call: the turn was cut short even if it then ended by itself.
 let wasRefused = false
+// A person sent a prompt during a pause: no pausing again until this session window resets.
+let overrideUntil = 0
 let resumeTimer: Timer | null = null
 
 async function setReading($: EngineInterface, next: PlanUsageReading | null): Promise<void> {
@@ -56,7 +58,8 @@ async function setPause($: EngineInterface, next: PlanUsagePause | null): Promis
   await $.state.set(PAUSE, next)
 }
 
-// Plan limits are per login, and every profile (CLAUDE_CONFIG_DIR) shares one $.store file.
+// Plan limits are per login. The store file is per configuration directory, but a machine can point several
+// CLAUDE_CONFIG_DIRs at one plugins folder, so the key keeps their readings apart.
 async function sharedKey($: EngineInterface): Promise<string> {
   return `reading:${(await $.env.get('CLAUDE_CONFIG_DIR')) ?? 'default'}`
 }
@@ -69,13 +72,16 @@ async function adopt($: EngineInterface, next: PlanUsageReading): Promise<void> 
   await checkPause($)
 }
 
-// A reply's figures, also stored so idle sessions on the same login see them.
-async function fromReply($: EngineInterface, limits: readonly SessionRateLimit[]): Promise<void> {
-  const now = await $.clock.now()
-  const copied: PlanUsageLimit[] = limits.map(({ kind, percentUsed, resetsAt }) =>
+function copyLimits(limits: readonly SessionRateLimit[]): PlanUsageLimit[] {
+  return limits.map(({ kind, percentUsed, resetsAt }) =>
     resetsAt === undefined ? { kind, percentUsed } : { kind, percentUsed, resetsAt },
   )
-  const reply: PlanUsageReading = { limits: copied, readAt: now }
+}
+
+// A model reply's figures, as session.measure delivers them: stamped now, and stored so idle sessions on the
+// same login see them.
+async function fromReply($: EngineInterface, limits: readonly SessionRateLimit[]): Promise<void> {
+  const reply: PlanUsageReading = { limits: copyLimits(limits), readAt: await $.clock.now() }
   await adopt($, reply)
   await $.store.set(await sharedKey($), reply)
 }
@@ -85,8 +91,17 @@ async function fromShared($: EngineInterface): Promise<void> {
   if (isReading(stored)) await adopt($, stored)
 }
 
+// The figures of this session's last reply when nothing better is known. They may be old, so they are never
+// stored for other sessions and are dated as far back as they could be: the start of this session.
+async function fromLastReply($: EngineInterface): Promise<void> {
+  if (latest !== null) return
+  const usage = await $.session.usage()
+  if (usage.rateLimits.length > 0) await adopt($, { limits: copyLimits(usage.rateLimits), readAt: usage.startedAt })
+}
+
 async function checkPause($: EngineInterface): Promise<void> {
-  if (!autoPause || turnId === null || held !== null || latest === null) return
+  const now = await $.clock.now()
+  if (!autoPause || turnId === null || held !== null || latest === null || now < overrideUntil) return
   const hit = pauseTrigger(latest.limits, threshold)
   if (hit === undefined) return
   const resetsAt = resetsAtMs(hit)
@@ -95,10 +110,13 @@ async function checkPause($: EngineInterface): Promise<void> {
     return
   }
   // A reading from a window that has since reset says nothing about the current one.
-  if (resetsAt <= (await $.clock.now())) return
+  if (resetsAt <= now) return
   await setPause($, { phase: 'pending', percentUsed: hit.percentUsed, resumeAt: resetsAt + RESUME_DELAY_MS })
-  $.ui.toast(`Session limit at ${hit.percentUsed}%: pausing after the running tool call`)
-  if (toolsRunning === 0) await stopTurn($)
+  if (toolsRunning === 0) {
+    await stopTurn($)
+    return
+  }
+  $.ui.toast(`Session limit at ${hit.percentUsed}%: pausing once the running tool call finishes`)
 }
 
 // Ends the running turn and waits for the reset.
@@ -115,7 +133,9 @@ async function stopTurn($: EngineInterface): Promise<void> {
     }
   }
   const now = await $.clock.now()
-  $.ui.log(`paused at ${held.percentUsed}% of the session limit; continuing at ${time.at(held.resumeAt, now)}`)
+  $.ui.log(
+    `paused at ${held.percentUsed}% of the session limit; continuing at ${time.at(held.resumeAt, now)}. Send a prompt yourself to cancel.`,
+  )
   await armResume($)
 }
 
@@ -144,10 +164,17 @@ async function resume($: EngineInterface): Promise<void> {
   await $.prompt.submit({ text: resumePrompt })
 }
 
+// Drops a pending or waiting pause without continuing anything.
+async function cancelPause($: EngineInterface): Promise<void> {
+  resumeTimer?.cancel()
+  resumeTimer = null
+  wasRefused = false
+  if (held !== null) await setPause($, null)
+}
+
 async function report($: EngineInterface): Promise<string> {
-  const usage = await $.session.usage()
-  if (usage.rateLimits.length > 0) await fromReply($, usage.rateLimits)
-  else await fromShared($)
+  await fromShared($)
+  await fromLastReply($)
   const now = await $.clock.now()
   const pause = held === null ? null : { ...held, resumeAtLocal: time.at(held.resumeAt, now) }
   return JSON.stringify(
@@ -159,6 +186,7 @@ async function report($: EngineInterface): Promise<string> {
       ...(latest === null
         ? { note: 'No reading yet: Claude Code reports plan limits with model replies on a claude.ai plan.' }
         : {}),
+      ...(zoneWarning === '' ? {} : { warning: zoneWarning }),
     },
     null,
     2,
@@ -183,9 +211,13 @@ export const register: Register = (on, options) => {
     latest = (await $.state.get(READING)).value ?? null
     held = (await $.state.get(PAUSE)).value ?? null
     if (zoneWarning !== '') $.ui.log(zoneWarning)
-    const usage = await $.session.usage()
-    if (usage.rateLimits.length > 0) await fromReply($, usage.rateLimits)
-    else await fromShared($)
+    if (autoPause && !e.isInteractive) {
+      // A claude -p run or SDK host ends with its turn, so a paused run could never continue.
+      autoPause = false
+      $.ui.log('auto_pause is off in this session: it runs only where a person is at the prompt')
+    }
+    await fromShared($)
+    await fromLastReply($)
     $.clock.every(SYNC_MS, () => {
       void fromShared($)
     })
@@ -194,7 +226,7 @@ export const register: Register = (on, options) => {
     await $.tool.register({
       name: 'plan_usage',
       description:
-        "The Claude plan's usage limits right now, at no token cost: one entry per window, with kind (five_hour is the session limit, seven_day the weekly one), percentUsed from 0 to 100, resetsAt as ISO 8601 and resetsAtLocal in the user's time zone. Check it before starting long or unattended work.",
+        "The Claude plan's usage limits right now, answered locally without a model call: one entry per window, with kind (five_hour is the session limit, seven_day the weekly one), percentUsed from 0 to 100, resetsAt as ISO 8601 and resetsAtLocal in the user's time zone. Check it before starting long or unattended work.",
       inputSchema: { type: 'object', properties: {} },
     })
     try {
@@ -207,12 +239,23 @@ export const register: Register = (on, options) => {
 
   // /clear, /resume and /branch reset $.state and start a different conversation: drop any pending continue.
   on('classic.SessionStart', { source: ['clear', 'resume', 'fork'] }, async ($, e, next) => {
-    resumeTimer?.cancel()
-    resumeTimer = null
     turnId = null
-    held = null
-    wasRefused = false
+    await cancelPause($)
     if (latest !== null) await $.state.set(READING, latest)
+    return next(e)
+  })
+
+  // A person at the keyboard outranks the pause: their prompt cancels it, and pausing stays off until the
+  // session window resets, as with Claude Code's own wait.
+  // Origins that mean a person sent the prompt: typed at the terminal (composer) or through Remote Control (bridge).
+  on('prompt.submit', { origin: { kind: /^(composer|bridge)$/ } }, async ($, e, next) => {
+    const hit = latest === null ? undefined : pauseTrigger(latest.limits, threshold)
+    if (held !== null || (autoPause && hit !== undefined)) {
+      const resetsAt = hit === undefined ? undefined : resetsAtMs(hit)
+      overrideUntil = Math.max(overrideUntil, resetsAt ?? 0, held?.resumeAt ?? 0)
+      if (held !== null) $.ui.toast('Pause cancelled: you sent a prompt')
+      await cancelPause($)
+    }
     return next(e)
   })
 
@@ -222,13 +265,16 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.start', async ($, e, next) => {
-    // Subagent turns start inside the main one; keep the main turn's id.
-    if (turnId === null) turnId = e.turnId
+    // A main turn that never reported turn.complete leaves its id behind; a new turn replaces it.
+    turnId = e.turnId
+    // A reading that crossed the threshold between turns applies to this one.
+    await checkPause($)
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
-    if (e.agentId === undefined) {
+    // Subagent turns complete with agentId set and do not end the main turn.
+    if (e.agentId === undefined && e.turnId === turnId) {
       turnId = null
       if (held !== null && held.phase === 'pending') {
         if (wasRefused) {
@@ -244,10 +290,8 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('tool.call', { tool: TOOL }, async $ => ({ result: await report($) }))
-
   on('tool.call', async ($, e, next) => {
-    if (held !== null) {
+    if (e.tool !== TOOL && held !== null) {
       wasRefused = true
       return {
         deny: `Paused: the plan's session limit is at ${held.percentUsed}%. Stop here; the session continues after the limit resets.`,
@@ -255,7 +299,7 @@ export const register: Register = (on, options) => {
     }
     toolsRunning += 1
     try {
-      return await next(e)
+      return e.tool === TOOL ? { result: await report($) } : await next(e)
     } finally {
       toolsRunning -= 1
       if (toolsRunning === 0) await stopTurn($)

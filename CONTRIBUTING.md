@@ -10,15 +10,18 @@ Issues and pull requests are welcome. For anything larger than a small fix, plea
    ```sh
    claude plugin test .
    claude plugin validate --strict .
-   prettier --check .
+   npx prettier --check .
    npx -p typescript tsc -p .
    ```
+
+A reload restarts the module but keeps the session's `$.state`, so the reading and any pause carry over. A tool call that is running when you save finishes in the old copy of the module; avoid saving mid-pause if you are testing the pause.
 
 ## Tests
 
 - Each test names the regression it guards in a `// GUARDS:` comment.
 - Tests fake only what Claude Code answers and the clock (`claude-code/testing`).
-- Keep the suite fast: it runs in under a second today.
+- Keep the suite fast: under 3 seconds.
+- Every behavior the README promises has a test that fails when the code behind it is removed. The one exception is restoring the reading and the pause after a hot reload: the test kit loads the module fresh for each test and offers no way to seed `$.state`, so check that by hand.
 
 ## Style
 
